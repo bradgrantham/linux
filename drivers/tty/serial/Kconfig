@@ -510,6 +510,16 @@ config SERIAL_IMX_EARLYCON
 	  If you have enabled the earlycon on the Freescale IMX
 	  CPU you can make it the earlycon by answering Y to this option.
 
+config SERIAL_GRIFFIN_DUART
+	bool "Griffin XR68C681 DUART serial support"
+	depends on M68KDT_GRIFFIN || COMPILE_TEST
+	select SERIAL_CORE
+	select SERIAL_CORE_CONSOLE
+	select SERIAL_EARLYCON
+	help
+	  Serial support for the Griffin homebrew 68010 machine's XR68C681
+	  DUART (channel A console), including earlycon.
+
 config SERIAL_UARTLITE
 	tristate "Xilinx uartlite serial port support"
 	depends on HAS_IOMEM

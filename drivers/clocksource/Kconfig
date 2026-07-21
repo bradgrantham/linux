@@ -831,4 +831,12 @@ config DRAGONBALL_TIMER
 	help
 	  Support for the DragonBall timer
 
+config GRIFFIN_DUART_TIMER
+	bool "Griffin XR68C681 DUART counter/timer clockevent"
+	depends on M68KDT_GRIFFIN || COMPILE_TEST
+	depends on TIMER_OF
+	help
+	  Periodic clockevent for the Griffin homebrew 68010 machine, using the
+	  XR68C681 DUART's 16-bit counter/timer in Timer mode.
+
 endmenu

@@ -15,4 +15,4 @@ obj-$(CONFIG_ROM)	+= romvec.o
 obj-$(CONFIG_ISDRAGONBALL) += ints_dragonball.o
 
 obj-$(CONFIG_M68KDT) += ints_generic.o
-obj-y += everdrive.o everdrive_fifo.o
+obj-$(CONFIG_M68KDT_MEGADRIVE) += everdrive.o everdrive_fifo.o

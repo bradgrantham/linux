@@ -1761,6 +1761,16 @@ config FB_BROADSHEET
 	  and could also have been called by other names when coupled with
 	  a bridge adapter.
 
+config FB_GRIFFIN
+	bool "Griffin VIDEO vsync IRQ handling (fbdev pending)"
+	depends on M68KDT_GRIFFIN || COMPILE_TEST
+	help
+	  VIDEO's vsync timing generator free-runs and its IRQ latch has no
+	  mask (only CLRINT to acknowledge), so once interrupts are enabled a
+	  handler must exist to keep the vsync IRQ acked or the CPU livelocks.
+	  This stub only acks; framebuffer support is added by a later Griffin
+	  fbdev driver reusing the same probe/IRQ scaffolding.
+
 config FB_SIMPLE
 	tristate "Simple framebuffer support"
 	depends on FB

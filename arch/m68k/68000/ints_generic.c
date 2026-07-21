@@ -195,6 +195,19 @@ static int __init mc680x0_intc_of_init(struct device_node *dn,
 	return 0;
 }
 
+/*
+ * This tree compiles under -m68000 (there is no separate CONFIG_M68010; the
+ * 68010 is selected purely by which intc DT node is present), so the compiler
+ * rejects the movec mnemonic -- emit it by hand.  0x4e7b 0x0801 = movec
+ * Rn,%VBR with the register field hardwired to d0 by that second word.
+ */
+static inline void set_vbr_68010(unsigned long value)
+{
+	register unsigned long v asm("d0") = value;
+
+	asm volatile(".word 0x4e7b, 0x0801" : : "d" (v));
+}
+
 static int __init mc68010_intc_of_init(struct device_node *dn,
 				       struct device_node *parent)
 {
@@ -211,6 +224,18 @@ static int __init mc68010_intc_of_init(struct device_node *dn,
 
 	for (int i = 33; i < 48; i++)
 		_ramvec[i] = (e_vector) inthandler_badtrap;
+
+	/*
+	 * Point VBR at the table just populated.  On stock 68010 boards VBR is
+	 * still at its reset value (0, matching _ramvec's CONFIG_VECTORBASE)
+	 * so this would be a no-op, but Griffin's u-boot deliberately relocates
+	 * VBR to protect its own vectors before bootelf loads the kernel at
+	 * physical 0 (see u-boot's arch/m68k/lib/traps.c) -- so the kernel must
+	 * not assume VBR is already 0.  Without this, real hardware exceptions
+	 * (e.g. the first timer IRQ) fetch their handler through u-boot's now
+	 * stale, since-overwritten table instead of the one just written here.
+	 */
+	set_vbr_68010((unsigned long) _ramvec);
 
 	return mc680x0_intc_of_init(dn, parent);
 }

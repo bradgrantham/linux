@@ -52,7 +52,7 @@ __HEAD
 .endm
 #endif
 
-#if 1 /* megadrive */
+#if defined(CONFIG_M68KDT_MEGADRIVE)
 #define MEGADRIVE_EVERDRIVE_MAILBOX             0xa130d0
 .macro __putch val
         /* hdr */
@@ -67,6 +67,21 @@ __HEAD
 
         /* Data */
         move.w #\val, MEGADRIVE_EVERDRIVE_MAILBOX
+.endm
+#elif defined(CONFIG_M68KDT_GRIFFIN)
+/* XR68C681 DUART channel A: poll SRA.TXRDY (bit 2), then write TBA.
+ * Assumes u-boot has already configured the DUART baud/mode. */
+#define GRIFFIN_DUART_SRA       0xf80003
+#define GRIFFIN_DUART_TBA       0xf80007
+.macro __putch val
+1:
+        move.b  GRIFFIN_DUART_SRA, %d0
+        btst    #2, %d0
+        beq     1b
+        move.b  #\val, GRIFFIN_DUART_TBA
+.endm
+#else
+.macro __putch val
 .endm
 #endif
 

@@ -30,7 +30,14 @@ config M68KDT_VIRT
 
 config M68KDT_MEGADRIVE
 	bool "Sega MegaDrive"
-	
+
+config M68KDT_GRIFFIN
+	bool "Griffin 68010"
+	help
+	  Support for the Griffin homebrew 68010 machine (XR68C681 DUART
+	  console, 1bpp framebuffer, CompactFlash).  The device tree is loaded
+	  by u-boot and passed in d7; see arch/m68k/dt/head.S.
+
 if !M68KDT
 config AMIGA
 	bool "Amiga support"
