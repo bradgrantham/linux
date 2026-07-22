@@ -220,6 +220,14 @@ config BLK_DEV_NBD
 
 	  If unsure, say N.
 
+config GRIFFIN_CF
+	bool "Griffin CompactFlash (True IDE 8-bit PIO) block driver"
+	depends on M68KDT_GRIFFIN || COMPILE_TEST
+	help
+	  Block driver for the Griffin board's CompactFlash card in True IDE
+	  8-bit PIO mode (0xF40000). No IRQ line -- fully polled, matching
+	  the u-boot driver of the same name that already proves the protocol.
+
 config BLK_DEV_RAM
 	tristate "RAM block device support"
 	help

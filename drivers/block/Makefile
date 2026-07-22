@@ -41,5 +41,6 @@ obj-$(CONFIG_BLK_DEV_UBLK)			+= ublk_drv.o
 obj-$(CONFIG_BLK_DEV_ZONED_LOOP) += zloop.o
 
 obj-$(CONFIG_M68KDT_MEGADRIVE) += everdrive_blk.o
+obj-$(CONFIG_GRIFFIN_CF) += griffin_cf.o
 
 swim_mod-y	:= swim.o swim_asm.o
