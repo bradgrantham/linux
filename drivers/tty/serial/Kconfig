@@ -518,7 +518,11 @@ config SERIAL_GRIFFIN_DUART
 	select SERIAL_EARLYCON
 	help
 	  Serial support for the Griffin homebrew 68010 machine's XR68C681
-	  DUART (channel A console), including earlycon.
+	  DUART (channel A console, earlycon, and interrupt-driven tty), plus
+	  the periodic clockevent using the same chip's counter/timer. One
+	  driver covers all three: they share a write-only interrupt mask
+	  register with no readback, so this can't safely be split across
+	  independently-probed drivers (see the file's header comment).
 
 config SERIAL_UARTLITE
 	tristate "Xilinx uartlite serial port support"
