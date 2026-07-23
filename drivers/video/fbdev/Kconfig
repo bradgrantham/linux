@@ -1762,14 +1762,18 @@ config FB_BROADSHEET
 	  a bridge adapter.
 
 config FB_GRIFFIN
-	bool "Griffin VIDEO vsync IRQ handling (fbdev pending)"
+	bool "Griffin 640x480x1 framebuffer (ENGINE/VIDEO CPLD pipeline)"
 	depends on M68KDT_GRIFFIN || COMPILE_TEST
+	depends on FB
+	select FB_IOMEM_HELPERS
 	help
-	  VIDEO's vsync timing generator free-runs and its IRQ latch has no
-	  mask (only CLRINT to acknowledge), so once interrupts are enabled a
-	  handler must exist to keep the vsync IRQ acked or the CPU livelocks.
-	  This stub only acks; framebuffer support is added by a later Griffin
-	  fbdev driver reusing the same probe/IRQ scaffolding.
+	  Framebuffer for the Griffin homebrew 68010 machine: the ENGINE CPLD
+	  bus-masters an 84-byte-stride "palette-and-pixels" framebuffer (from
+	  a 64 KiB-aligned reserved-memory carveout) into the VIDEO CPLD's
+	  VGA 640x480@60 1bpp output.  Also owns the vsync IRQ ack: the vsync
+	  latch has no mask of its own (CTRL.IRQENB only gates the pin), so
+	  once IRQENB is up a live ack handler is what keeps the CPU out of a
+	  vsync interrupt livelock.
 
 config FB_SIMPLE
 	tristate "Simple framebuffer support"

@@ -92,6 +92,18 @@ void __init setup_arch(char **cmdline_p)
 	// We need to get this somehow better
 	setup_machine_fdt(_dtblob);
 
+	/*
+	 * Actually reserve /reserved-memory regions (and /memreserve/) in
+	 * memblock.  Without this arch call -- see the function's own doc --
+	 * only unflatten_device_tree()'s late scan runs, which just catalogs
+	 * the regions (printing "OF: reserved mem: ... nomap" convincingly)
+	 * WITHOUT excluding them from allocation.  memblock allocates
+	 * top-down, so the very first casualty is mem_map itself landing
+	 * inside a top-of-RAM carveout (e.g. Griffin's framebuffer), where
+	 * the display engine then shreds page structs.
+	 */
+	early_init_fdt_scan_reserved_mem();
+
 	setup_initial_init_mm(_stext, _etext, _edata, NULL);
 
 	/* populate cmd_line too for later use, preserving boot_command_line */
