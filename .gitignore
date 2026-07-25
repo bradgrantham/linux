@@ -68,7 +68,9 @@ modules.order
 /modules-only.symvers
 /vmlinux
 /vmlinux.32
+/vmlinux.lz4
 /vmlinux.map
+/vmlinux.stripped
 /vmlinux.symvers
 /vmlinux.thinlto-index
 /vmlinux.unstripped
