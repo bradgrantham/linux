@@ -28,7 +28,9 @@
  * pending vsync would livelock the CPU the moment IRQENB went up.
  */
 
+#include <linux/console.h>
 #include <linux/fb.h>
+#include <linux/font.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of.h>
@@ -62,6 +64,153 @@ struct griffin_fb {
 	void __iomem *fb;	/* carveout base (headers included) */
 	struct fb_info *info;
 };
+
+/*
+ * Early framebuffer boot console: renders printk into the framebuffer from
+ * early kernel init, so the display stays live between u-boot (which leaves
+ * the ENGINE/VIDEO pipeline running on the same carveout) and fbcon.
+ *
+ * Registered directly as a CON_BOOT console from a console_initcall rather
+ * than through the earlycon framework: earlycon supports exactly one early
+ * console and the DUART already claims it (setup_earlycon -> -EALREADY for
+ * a second).  CON_PRINTBUFFER replays everything printed before
+ * registration, so nothing is lost, and like any boot console it is
+ * auto-unregistered when the first real console (tty0/fbcon) comes up.
+ *
+ * It runs long before the DT platform device exists, and on this machine
+ * every address is fixed by construction (the carveout must be the
+ * 64 KiB-aligned reserved-memory block, SOURCE_PAGE is A[23:16] only), so
+ * the addresses are compiled in.  Rendering is a micro-textport: glyph
+ * blits from the built-in VGA8x16 font, one contiguous memmove per scroll
+ * -- the same layout tricks as the fbdev driver below.  The probe of the
+ * real driver silences it (it would otherwise scribble over fbcon's screen
+ * until the boot console is unregistered).
+ */
+
+#define GRIFFIN_EARLY_FB	((u8 *)0x007f0000)
+#define GRIFFIN_EARLY_ENGINE	((u8 *)0x00d00000)
+#define GRIFFIN_EARLY_VIDEO	((u8 *)0x00e00000)
+#define GRIFFIN_EARLY_COLS	(GRIFFIN_XRES / 8)
+#define GRIFFIN_EARLY_ROWS	(GRIFFIN_YRES / 16)
+
+static struct {
+	const struct font_desc *font;
+	int x, y;
+	bool stop;		/* set by griffin_video_probe: fbcon owns the fb now */
+} griffin_earlyfb;
+
+static void griffin_earlyfb_scroll(void)
+{
+	u8 *fb = GRIFFIN_EARLY_FB;
+	int line;
+
+	/* One contiguous block move, headers over identical headers. */
+	memmove(fb, fb + 16 * GRIFFIN_LINE_STRIDE,
+		(GRIFFIN_EARLY_ROWS - 1) * 16 * GRIFFIN_LINE_STRIDE);
+	for (line = (GRIFFIN_EARLY_ROWS - 1) * 16; line < GRIFFIN_YRES; line++)
+		memset(fb + line * GRIFFIN_LINE_STRIDE + GRIFFIN_LINE_HDR, 0,
+		       GRIFFIN_LINE_PIXBYTES);
+}
+
+static void griffin_earlyfb_putc(char c)
+{
+	const u8 *glyph;
+	u8 *dst;
+	int row;
+
+	if (c == '\n') {
+		griffin_earlyfb.x = 0;
+		griffin_earlyfb.y++;
+	} else if (c == '\r') {
+		griffin_earlyfb.x = 0;
+		return;
+	} else if (c == '\t') {
+		griffin_earlyfb.x = (griffin_earlyfb.x + 8) & ~7;
+	} else if ((unsigned char)c >= 0x20) {
+		if (griffin_earlyfb.x >= GRIFFIN_EARLY_COLS) {
+			griffin_earlyfb.x = 0;
+			griffin_earlyfb.y++;
+		}
+		if (griffin_earlyfb.y >= GRIFFIN_EARLY_ROWS) {
+			griffin_earlyfb_scroll();
+			griffin_earlyfb.y = GRIFFIN_EARLY_ROWS - 1;
+		}
+		glyph = (const u8 *)griffin_earlyfb.font->data +
+			(unsigned char)c * 16;
+		dst = GRIFFIN_EARLY_FB +
+			griffin_earlyfb.y * 16 * GRIFFIN_LINE_STRIDE +
+			GRIFFIN_LINE_HDR + griffin_earlyfb.x;
+		for (row = 0; row < 16; row++) {
+			*dst = glyph[row];
+			dst += GRIFFIN_LINE_STRIDE;
+		}
+		griffin_earlyfb.x++;
+		return;
+	} else {
+		return;
+	}
+
+	if (griffin_earlyfb.y >= GRIFFIN_EARLY_ROWS) {
+		griffin_earlyfb_scroll();
+		griffin_earlyfb.y = GRIFFIN_EARLY_ROWS - 1;
+	}
+}
+
+static void griffin_earlyfb_write(struct console *con, const char *s,
+				  unsigned int count)
+{
+	if (griffin_earlyfb.stop)
+		return;
+	while (count--)
+		griffin_earlyfb_putc(*s++);
+}
+
+static struct console griffin_earlyfb_console = {
+	.name	= "griffin_fb",
+	.write	= griffin_earlyfb_write,
+	/* CON_ENABLED preset (the netconsole pattern): the cmdline carries
+	 * console=tty0/ttyS0, and an extra console that matches neither is
+	 * only accepted pre-enabled. */
+	.flags	= CON_PRINTBUFFER | CON_BOOT | CON_ENABLED,
+	.index	= 0,
+};
+
+static int __init griffin_earlyfb_init(void)
+{
+	u8 *fb = GRIFFIN_EARLY_FB;
+	int line;
+
+	/* FB_GRIFFIN can be built under COMPILE_TEST; only ever touch the
+	 * hardware on the real machine. */
+	if (!of_machine_is_compatible("griffin,griffin"))
+		return 0;
+
+	griffin_earlyfb.font = find_font("VGA8x16");
+	if (!griffin_earlyfb.font)
+		return -ENODEV;
+
+	/* Fresh screen: black pixels, white-on-black headers.  Then make
+	 * sure the pipeline is lit (u-boot normally left it running on this
+	 * very carveout; these writes are idempotent) -- SOURCE_PAGE,
+	 * ENGINE, then VIDEO, never IRQENB (no ack handler yet). */
+	for (line = 0; line < GRIFFIN_YRES; line++) {
+		u8 *hdr = fb + line * GRIFFIN_LINE_STRIDE;
+
+		hdr[0] = GRIFFIN_FG_R3G3B2;
+		hdr[1] = GRIFFIN_BG_R3G3B2;
+		hdr[2] = 0;
+		hdr[3] = 0;
+		memset(hdr + GRIFFIN_LINE_HDR, 0, GRIFFIN_LINE_PIXBYTES);
+	}
+	GRIFFIN_EARLY_ENGINE[ENGINE_SOURCE_PAGE] =
+		(unsigned long)GRIFFIN_EARLY_FB >> 16;
+	GRIFFIN_EARLY_ENGINE[ENGINE_CTRL] = ENGINE_CTRL_DMA_EN;
+	GRIFFIN_EARLY_VIDEO[VIDEO_CTRL] = VIDEO_CTRL_ENABLE;
+
+	register_console(&griffin_earlyfb_console);
+	return 0;
+}
+console_initcall(griffin_earlyfb_init);
 
 static irqreturn_t griffin_vsync_irq(int irq, void *dev_id)
 {
@@ -250,7 +399,12 @@ static int griffin_video_probe(struct platform_device *pdev)
 	if (!gf->fb)
 		return -ENOMEM;
 
-	/* Quiesce (defensively; u-boot already did) and ack any stale vsync. */
+	/* From here the framebuffer belongs to fbcon; the early boot console
+	 * must stop scribbling into it (printk keeps calling boot consoles
+	 * until the first real console registers). */
+	griffin_earlyfb.stop = true;
+
+	/* Quiesce (defensively) and ack any stale vsync. */
 	writeb(0x00, gf->engine + ENGINE_CTRL);
 	writeb(0x00, gf->video + VIDEO_CTRL);
 	writeb(0x00, gf->video + VIDEO_CLRINT);
