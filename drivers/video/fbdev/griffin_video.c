@@ -46,7 +46,9 @@
 /* ENGINE registers (byte-wide, odd addresses; reg index 1). */
 #define ENGINE_SOURCE_PAGE	0x03	/* w: framebuffer A[23:16] */
 #define ENGINE_CTRL		0x05	/* w: bit0 DMA_EN */
+#define ENGINE_STATUS		0x05	/* r: bit0 DMA_EN readback */
 #define ENGINE_CTRL_DMA_EN	BIT(0)
+#define VIDEO_CTRL_RB		0x05	/* r: bit0 ENABLE readback */
 
 #define GRIFFIN_XRES		640
 #define GRIFFIN_YRES		480
@@ -189,23 +191,61 @@ static int __init griffin_earlyfb_init(void)
 	if (!griffin_earlyfb.font)
 		return -ENODEV;
 
-	/* Fresh screen: black pixels, white-on-black headers.  Then make
-	 * sure the pipeline is lit (u-boot normally left it running on this
-	 * very carveout; these writes are idempotent) -- SOURCE_PAGE,
-	 * ENGINE, then VIDEO, never IRQENB (no ack handler yet). */
-	for (line = 0; line < GRIFFIN_YRES; line++) {
-		u8 *hdr = fb + line * GRIFFIN_LINE_STRIDE;
+	if (GRIFFIN_EARLY_ENGINE[ENGINE_STATUS] & ENGINE_CTRL_DMA_EN) {
+		/* The display is live with the boot chain's output (ROM
+		 * monitor + u-boot, vgacon-style): keep it and continue
+		 * below the last used text row. */
+		int row, i;
 
-		hdr[0] = GRIFFIN_FG_R3G3B2;
-		hdr[1] = GRIFFIN_BG_R3G3B2;
-		hdr[2] = 0;
-		hdr[3] = 0;
-		memset(hdr + GRIFFIN_LINE_HDR, 0, GRIFFIN_LINE_PIXBYTES);
+		if (fb[0] != GRIFFIN_FG_R3G3B2)
+			for (line = 0; line < GRIFFIN_YRES; line++) {
+				u8 *hdr = fb + line * GRIFFIN_LINE_STRIDE;
+
+				hdr[0] = GRIFFIN_FG_R3G3B2;
+				hdr[1] = GRIFFIN_BG_R3G3B2;
+			}
+		if (!(GRIFFIN_EARLY_VIDEO[VIDEO_CTRL_RB] & VIDEO_CTRL_ENABLE))
+			GRIFFIN_EARLY_VIDEO[VIDEO_CTRL] = VIDEO_CTRL_ENABLE;
+
+		for (row = GRIFFIN_EARLY_ROWS - 1; row >= 0; row--) {
+			bool blank = true;
+
+			for (line = row * 16;
+			     blank && line < (row + 1) * 16; line++)
+				for (i = 0; i < GRIFFIN_LINE_PIXBYTES; i++)
+					if (fb[line * GRIFFIN_LINE_STRIDE +
+					       GRIFFIN_LINE_HDR + i]) {
+						blank = false;
+						break;
+					}
+			if (!blank)
+				break;
+		}
+		griffin_earlyfb.y = row + 1;
+		if (griffin_earlyfb.y >= GRIFFIN_EARLY_ROWS) {
+			griffin_earlyfb_scroll();
+			griffin_earlyfb.y = GRIFFIN_EARLY_ROWS - 1;
+		}
+	} else {
+		/* Display off (no u-boot video stage): fresh screen -- black
+		 * pixels, white-on-black headers -- then light the pipeline:
+		 * SOURCE_PAGE, ENGINE, then VIDEO, never IRQENB (no ack
+		 * handler yet). */
+		for (line = 0; line < GRIFFIN_YRES; line++) {
+			u8 *hdr = fb + line * GRIFFIN_LINE_STRIDE;
+
+			hdr[0] = GRIFFIN_FG_R3G3B2;
+			hdr[1] = GRIFFIN_BG_R3G3B2;
+			hdr[2] = 0;
+			hdr[3] = 0;
+			memset(hdr + GRIFFIN_LINE_HDR, 0,
+			       GRIFFIN_LINE_PIXBYTES);
+		}
+		GRIFFIN_EARLY_ENGINE[ENGINE_SOURCE_PAGE] =
+			(unsigned long)GRIFFIN_EARLY_FB >> 16;
+		GRIFFIN_EARLY_ENGINE[ENGINE_CTRL] = ENGINE_CTRL_DMA_EN;
+		GRIFFIN_EARLY_VIDEO[VIDEO_CTRL] = VIDEO_CTRL_ENABLE;
 	}
-	GRIFFIN_EARLY_ENGINE[ENGINE_SOURCE_PAGE] =
-		(unsigned long)GRIFFIN_EARLY_FB >> 16;
-	GRIFFIN_EARLY_ENGINE[ENGINE_CTRL] = ENGINE_CTRL_DMA_EN;
-	GRIFFIN_EARLY_VIDEO[VIDEO_CTRL] = VIDEO_CTRL_ENABLE;
 
 	register_console(&griffin_earlyfb_console);
 	return 0;
