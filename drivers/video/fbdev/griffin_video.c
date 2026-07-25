@@ -95,9 +95,120 @@ static const struct fb_var_screeninfo griffin_fb_var = {
 	.vmode		= FB_VMODE_NONINTERLACED,
 };
 
+/*
+ * Draw ops: the generic cfb_* engines are portability code (any bpp, any bit
+ * alignment, foreign endian) and on this -m68000 build their inner loops
+ * compile to an out-of-line call per 32-bit word plus __mulsi3 software
+ * multiplies in setup -- ~6x slower than the ROM firmware's textport, which
+ * scrolls the same buffer with unrolled move.l copies.  fbcon only ever draws
+ * on 8-pixel character-cell boundaries, so everything it generates is
+ * byte-aligned in this 1bpp layout; fast-path those cases with the kernel's
+ * m68k memcpy/memmove/memset (hand-written unroll-by-8 move.l, the same loop
+ * the firmware uses) and punt anything else to the generic ops.
+ *
+ * The in-band 4-byte line headers constrain the fast paths differently:
+ * copyarea's full-width block move may span them (it copies headers over
+ * identical headers, set once at probe), but fillrect must stay within each
+ * line's 80 pixel bytes or it would overwrite the palette.
+ */
+
+static void griffin_copyarea(struct fb_info *info,
+			     const struct fb_copyarea *area)
+{
+	u8 *base = (u8 __force *)info->screen_base;
+	unsigned int stride = info->fix.line_length;
+	unsigned int wbytes = area->width >> 3;
+	u8 *src, *dst;
+	int line;
+
+	/* fbcon moves whole character cells: sx == dx, all multiples of 8. */
+	if (((area->sx | area->dx | area->width) & 7) || area->sx != area->dx) {
+		cfb_copyarea(info, area);
+		return;
+	}
+
+	src = base + area->sy * stride + (area->sx >> 3);
+	dst = base + area->dy * stride + (area->dx >> 3);
+
+	if (area->sx == 0 && wbytes == GRIFFIN_LINE_PIXBYTES) {
+		/* Full-width (the scroll bmove): one contiguous block,
+		 * interior headers copied over identical headers. */
+		memmove(dst, src, (area->height - 1) * stride + wbytes);
+		return;
+	}
+
+	/* Partial-width run: per scanline, ordered so overlapping rows are
+	 * read before they are overwritten. */
+	if (area->dy <= area->sy) {
+		for (line = 0; line < area->height; line++)
+			memmove(dst + line * stride, src + line * stride,
+				wbytes);
+	} else {
+		for (line = area->height - 1; line >= 0; line--)
+			memmove(dst + line * stride, src + line * stride,
+				wbytes);
+	}
+}
+
+static void griffin_fillrect(struct fb_info *info,
+			     const struct fb_fillrect *rect)
+{
+	u8 *base = (u8 __force *)info->screen_base;
+	unsigned int stride = info->fix.line_length;
+	u8 val = (rect->color & 1) ? 0xFF : 0x00;
+	u8 *dst;
+	unsigned int line;
+
+	if (((rect->dx | rect->width) & 7) || rect->rop != ROP_COPY) {
+		cfb_fillrect(info, rect);
+		return;
+	}
+
+	/* Per scanline: never cross the in-band palette headers. */
+	dst = base + rect->dy * stride + (rect->dx >> 3);
+	for (line = 0; line < rect->height; line++)
+		memset(dst + line * stride, val, rect->width >> 3);
+}
+
+static void griffin_imageblit(struct fb_info *info,
+			      const struct fb_image *image)
+{
+	u8 *base = (u8 __force *)info->screen_base;
+	unsigned int stride = info->fix.line_length;
+	unsigned int wbytes = image->width >> 3;
+	const u8 *src = image->data;
+	u8 fg = (image->fg_color & 1) ? 0xFF : 0x00;
+	u8 bg = (image->bg_color & 1) ? 0xFF : 0x00;
+	u8 *dst;
+	unsigned int line, i;
+
+	if (image->depth != 1 || ((image->dx | image->width) & 7)) {
+		cfb_imageblit(info, image);
+		return;
+	}
+
+	/* 1bpp glyph rows onto 1bpp lines, both MSB-leftmost: each source
+	 * byte maps straight to a framebuffer byte through the fg/bg pair
+	 * (white-on-black is the identity). */
+	dst = base + image->dy * stride + (image->dx >> 3);
+	for (line = 0; line < image->height; line++) {
+		for (i = 0; i < wbytes; i++) {
+			u8 s = src[i];
+
+			dst[i] = (s & fg) | (~s & bg);
+		}
+		src += wbytes;
+		dst += stride;
+	}
+}
+
 static const struct fb_ops griffin_fb_ops = {
 	.owner = THIS_MODULE,
-	FB_DEFAULT_IOMEM_OPS,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
+	.fb_fillrect	= griffin_fillrect,
+	.fb_copyarea	= griffin_copyarea,
+	.fb_imageblit	= griffin_imageblit,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 static int griffin_video_probe(struct platform_device *pdev)
