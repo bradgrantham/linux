@@ -167,6 +167,15 @@ static int griffin_video_probe(struct platform_device *pdev)
 	info->fbops = &griffin_fb_ops;
 	info->var = griffin_fb_var;
 	info->fix = griffin_fb_fix;
+	/*
+	 * The framebuffer is plain RAM (the carveout), so reads are as cheap as
+	 * writes: advertise READS_FAST + COPYAREA so fbcon picks SCROLL_MOVE and
+	 * relocates glyph runs with fb_copyarea (cfb_copyarea) instead of
+	 * SCROLL_REDRAW re-imageblitting every character each scroll.  Requires
+	 * CONFIG_FRAMEBUFFER_CONSOLE_LEGACY_ACCELERATION; without it fbcon forces
+	 * SCROLL_REDRAW regardless (see fb_scrollmode()).
+	 */
+	info->flags = FBINFO_READS_FAST | FBINFO_HWACCEL_COPYAREA;
 	/* +4: skip line 0's header so pixels land at screen_base + N*stride. */
 	info->screen_base = (char __iomem *)gf->fb + GRIFFIN_LINE_HDR;
 	info->screen_size = GRIFFIN_FB_SIZE - GRIFFIN_LINE_HDR;
