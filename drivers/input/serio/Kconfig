@@ -188,6 +188,16 @@ config SERIO_RAW
 	  To compile this driver as a module, choose M here: the
 	  module will be called serio_raw.
 
+config SERIO_GRIFFIN
+	tristate "Griffin GLUE PS/2 keyboard frame engine"
+	depends on M68KDT_GRIFFIN || COMPILE_TEST
+	depends on HAS_IOMEM
+	help
+	  Say Y here for the Griffin homebrew 68010's PS/2 keyboard port: the
+	  GLUE CPLD assembles whole PS/2 frames and raises one autovector
+	  level-4 IRQ per byte. atkbd sits on top of this serio port and does
+	  the scan-set-2 decoding.
+
 config SERIO_ALTERA_PS2
 	tristate "Altera UP PS/2 controller"
 	depends on HAS_IOMEM
