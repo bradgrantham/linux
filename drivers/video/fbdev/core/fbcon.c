@@ -1850,8 +1850,26 @@ static bool fbcon_scroll(struct vc_data *vc, unsigned int t, unsigned int b,
 			count = vc->vc_rows;
 		switch (fb_scrollmode(p)) {
 		case SCROLL_MOVE:
-			fbcon_redraw_blit(vc, info, p, t, b - t - count,
-				     count);
+			if (info->flags & FBINFO_READS_FAST) {
+				/* Framebuffer reads cost the same as writes
+				 * (plain RAM): one block move beats
+				 * fbcon_redraw_blit()'s cell-by-cell
+				 * compare-and-blit pass. */
+				fbcon_bmove(vc, t + count, 0, t, 0,
+					    b - t - count, vc->vc_cols);
+				scr_memmovew((unsigned short *)
+						(vc->vc_origin +
+						 vc->vc_size_row * t),
+					     (unsigned short *)
+						(vc->vc_origin +
+						 vc->vc_size_row *
+						 (t + count)),
+					     (b - t - count) *
+						vc->vc_size_row);
+			} else {
+				fbcon_redraw_blit(vc, info, p, t,
+						  b - t - count, count);
+			}
 			__fbcon_clear(vc, b - count, 0, count, vc->vc_cols);
 			scr_memsetw((unsigned short *) (vc->vc_origin +
 							vc->vc_size_row *
@@ -1938,8 +1956,22 @@ static bool fbcon_scroll(struct vc_data *vc, unsigned int t, unsigned int b,
 			count = vc->vc_rows;
 		switch (fb_scrollmode(p)) {
 		case SCROLL_MOVE:
-			fbcon_redraw_blit(vc, info, p, b - 1, b - t - count,
-				     -count);
+			if (info->flags & FBINFO_READS_FAST) {
+				fbcon_bmove(vc, t, 0, t + count, 0,
+					    b - t - count, vc->vc_cols);
+				scr_memmovew((unsigned short *)
+						(vc->vc_origin +
+						 vc->vc_size_row *
+						 (t + count)),
+					     (unsigned short *)
+						(vc->vc_origin +
+						 vc->vc_size_row * t),
+					     (b - t - count) *
+						vc->vc_size_row);
+			} else {
+				fbcon_redraw_blit(vc, info, p, b - 1,
+						  b - t - count, -count);
+			}
 			__fbcon_clear(vc, t, 0, count, vc->vc_cols);
 			scr_memsetw((unsigned short *) (vc->vc_origin +
 							vc->vc_size_row *
