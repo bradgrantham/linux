@@ -44,7 +44,9 @@
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 
-/* Register offsets (byte-wide, odd addresses within the DUART window). */
+/* Register offsets (byte-wide, odd addresses within the DUART window).
+ * Channel B mirrors channel A at +0x10; SRB/CRB share SRA/CRA's bit
+ * layouts. */
 #define XR_MR1A		0x01	/* rw: MR1A/MR2A share offset, ptr auto-advances */
 #define XR_SRA		0x03	/* r:  channel A status register */
 #define XR_CSRA		0x03	/* w:  channel A clock select */
@@ -56,6 +58,12 @@
 #define XR_IMR		0x0B	/* w:  interrupt mask register (write-only!) */
 #define XR_CTUR		0x0D	/* w:  counter/timer upper preload */
 #define XR_CTLR		0x0F	/* w:  counter/timer lower preload */
+#define XR_MR1B		0x11	/* rw: MR1B/MR2B share offset, ptr auto-advances */
+#define XR_SRB		0x13	/* r:  channel B status register */
+#define XR_CSRB		0x13	/* w:  channel B clock select */
+#define XR_CRB		0x15	/* w:  channel B command register */
+#define XR_RBB		0x17	/* r:  channel B receive buffer */
+#define XR_TBB		0x17	/* w:  channel B transmit buffer */
 #define XR_STARTCC	0x1D	/* r:  start counter/timer command */
 #define XR_STOPCC	0x1F	/* r:  stop counter/timer command (Timer mode: ack only) */
 
@@ -69,10 +77,14 @@
 #define XR_ISR_TXRDYA		BIT(0)
 #define XR_ISR_RXRDYA		BIT(1)
 #define XR_ISR_CTR_READY	BIT(3)
+#define XR_ISR_TXRDYB		BIT(4)
+#define XR_ISR_RXRDYB		BIT(5)
 
 #define XR_IMR_TXRDYA		BIT(0)
 #define XR_IMR_RXRDYA		BIT(1)
 #define XR_IMR_CTR_READY	BIT(3)
+#define XR_IMR_TXRDYB		BIT(4)
+#define XR_IMR_RXRDYB		BIT(5)
 
 #define XR_ACR_CT_MODE_TIMER_X1_CLK	(6 << 4)	/* Timer, X1/CLK, BRG_SET=0 */
 
@@ -117,6 +129,18 @@ OF_EARLYCON_DECLARE(griffin_duart, "griffin,duart-xr68c681",
  * Shared state: one instance (Griffin has exactly one DUART).
  * ------------------------------------------------------------------------ */
 
+/* One tty channel of the DUART: the uart_port plus everything that differs
+ * between channels A and B (register offsets, IMR bits).  The chip-shared
+ * pieces (base, IMR shadow, clockevent, the one IRQ) stay in griffin_duart;
+ * since Griffin has exactly one DUART, the ops reach it via the &gd
+ * singleton and get the channel via container_of on the embedded port. */
+struct griffin_uart_chan {
+	struct uart_port port;
+	bool active;		/* set once startup() has run for this channel */
+	u8 sr, cr, rb, tb;	/* register offsets */
+	u8 imr_rx, imr_tx;	/* this channel's IMR/ISR bits */
+};
+
 struct griffin_duart {
 	void __iomem *base;
 	spinlock_t imr_lock;
@@ -124,11 +148,15 @@ struct griffin_duart {
 
 	struct clock_event_device clkevt;
 
-	struct uart_port port;
-	bool port_active;	/* set once griffin_uart_probe()'s startup() has run */
+	struct griffin_uart_chan chan[2];	/* 0 = A (console), 1 = B */
 };
 
 static struct griffin_duart gd;
+
+static inline struct griffin_uart_chan *to_chan(struct uart_port *port)
+{
+	return container_of(port, struct griffin_uart_chan, port);
+}
 
 static void griffin_imr_update(struct griffin_duart *d, u8 set_mask, u8 clear_mask)
 {
@@ -144,34 +172,35 @@ static void griffin_imr_update(struct griffin_duart *d, u8 set_mask, u8 clear_ma
  * tty RX/TX (called from the shared ISR once port_active).
  * ------------------------------------------------------------------------ */
 
-static void griffin_uart_rx_chars(struct griffin_duart *d)
+static void griffin_uart_rx_chars(struct griffin_duart *d,
+				  struct griffin_uart_chan *c)
 {
-	struct uart_port *port = &d->port;
-	u8 sra, ch;
+	struct uart_port *port = &c->port;
+	u8 sr, ch;
 	char flag;
 
-	while ((sra = readb(d->base + XR_SRA)) & XR_SRA_RXRDY) {
-		ch = readb(d->base + XR_RBA);
+	while ((sr = readb(d->base + c->sr)) & XR_SRA_RXRDY) {
+		ch = readb(d->base + c->rb);
 		flag = TTY_NORMAL;
 		port->icount.rx++;
 
-		if (sra & (XR_SRA_OE | XR_SRA_PE | XR_SRA_FE)) {
-			if (sra & XR_SRA_FE) {
+		if (sr & (XR_SRA_OE | XR_SRA_PE | XR_SRA_FE)) {
+			if (sr & XR_SRA_FE) {
 				port->icount.frame++;
 				flag = TTY_FRAME;
-			} else if (sra & XR_SRA_PE) {
+			} else if (sr & XR_SRA_PE) {
 				port->icount.parity++;
 				flag = TTY_PARITY;
 			}
-			if (sra & XR_SRA_OE)
+			if (sr & XR_SRA_OE)
 				port->icount.overrun++;
-			writeb(0x40, d->base + XR_CRA);	/* MC=4: reset error status */
+			writeb(0x40, d->base + c->cr);	/* MC=4: reset error status */
 		}
 
 		if (uart_handle_sysrq_char(port, ch))
 			continue;
 
-		uart_insert_char(port, sra, XR_SRA_OE, ch, flag);
+		uart_insert_char(port, sr, XR_SRA_OE, ch, flag);
 	}
 
 	tty_flip_buffer_push(&port->state->port);
@@ -181,14 +210,15 @@ static void griffin_uart_rx_chars(struct griffin_duart *d)
 
 static void griffin_uart_stop_tx(struct uart_port *port);
 
-static void griffin_uart_tx_chars(struct griffin_duart *d)
+static void griffin_uart_tx_chars(struct griffin_duart *d,
+				  struct griffin_uart_chan *c)
 {
-	struct uart_port *port = &d->port;
+	struct uart_port *port = &c->port;
 	struct tty_port *tport = &port->state->port;
 	unsigned char ch;
 
 	if (port->x_char) {
-		writeb(port->x_char, d->base + XR_TBA);
+		writeb(port->x_char, d->base + c->tb);
 		port->icount.tx++;
 		port->x_char = 0;
 		return;
@@ -199,10 +229,10 @@ static void griffin_uart_tx_chars(struct griffin_duart *d)
 		return;
 	}
 
-	while (readb(d->base + XR_SRA) & XR_SRA_TXRDY) {
+	while (readb(d->base + c->sr) & XR_SRA_TXRDY) {
 		if (!uart_fifo_get(port, &ch))
 			break;
-		writeb(ch, d->base + XR_TBA);
+		writeb(ch, d->base + c->tb);
 		port->icount.tx++;
 	}
 
@@ -231,13 +261,24 @@ static irqreturn_t griffin_duart_isr(int irq, void *dev_id)
 		ret = IRQ_HANDLED;
 	}
 
-	if (d->port_active) {
+	if (d->chan[0].active) {
 		if (isr & XR_ISR_RXRDYA) {
-			griffin_uart_rx_chars(d);
+			griffin_uart_rx_chars(d, &d->chan[0]);
 			ret = IRQ_HANDLED;
 		}
 		if (isr & XR_ISR_TXRDYA) {
-			griffin_uart_tx_chars(d);
+			griffin_uart_tx_chars(d, &d->chan[0]);
+			ret = IRQ_HANDLED;
+		}
+	}
+
+	if (d->chan[1].active) {
+		if (isr & XR_ISR_RXRDYB) {
+			griffin_uart_rx_chars(d, &d->chan[1]);
+			ret = IRQ_HANDLED;
+		}
+		if (isr & XR_ISR_TXRDYB) {
+			griffin_uart_tx_chars(d, &d->chan[1]);
 			ret = IRQ_HANDLED;
 		}
 	}
@@ -330,14 +371,14 @@ TIMER_OF_DECLARE(griffin_duart, "griffin,duart-xr68c681", griffin_duart_timer_in
 
 static unsigned int griffin_uart_tx_empty(struct uart_port *port)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
+	struct griffin_uart_chan *c = to_chan(port);
 
-	return (readb(d->base + XR_SRA) & XR_SRA_TXEMT) ? TIOCSER_TEMT : 0;
+	return (readb(gd.base + c->sr) & XR_SRA_TXEMT) ? TIOCSER_TEMT : 0;
 }
 
 static void griffin_uart_set_mctrl(struct uart_port *port, unsigned int mctrl)
 {
-	/* No modem control lines wired on Griffin's channel A. */
+	/* No modem control lines wired on Griffin's DUART channels. */
 }
 
 static unsigned int griffin_uart_get_mctrl(struct uart_port *port)
@@ -347,35 +388,29 @@ static unsigned int griffin_uart_get_mctrl(struct uart_port *port)
 
 static void griffin_uart_start_tx(struct uart_port *port)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
-
-	griffin_imr_update(d, XR_IMR_TXRDYA, 0);
+	griffin_imr_update(&gd, to_chan(port)->imr_tx, 0);
 }
 
 static void griffin_uart_stop_tx(struct uart_port *port)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
-
-	griffin_imr_update(d, 0, XR_IMR_TXRDYA);
+	griffin_imr_update(&gd, 0, to_chan(port)->imr_tx);
 }
 
 static void griffin_uart_stop_rx(struct uart_port *port)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
-
-	griffin_imr_update(d, 0, XR_IMR_RXRDYA);
+	griffin_imr_update(&gd, 0, to_chan(port)->imr_rx);
 }
 
 static void griffin_uart_break_ctl(struct uart_port *port, int ctl)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
+	struct griffin_uart_chan *c = to_chan(port);
 
-	writeb(ctl ? 0x60 : 0x70, d->base + XR_CRA);	/* MC=6 start / MC=7 stop break */
+	writeb(ctl ? 0x60 : 0x70, gd.base + c->cr);	/* MC=6 start / MC=7 stop break */
 }
 
 static int griffin_uart_startup(struct uart_port *port)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
+	struct griffin_uart_chan *c = to_chan(port);
 	unsigned long flags;
 
 	/*
@@ -383,24 +418,24 @@ static int griffin_uart_startup(struct uart_port *port)
 	 * for the chip's whole lifetime) -- no request_irq() here.
 	 */
 	spin_lock_irqsave(&port->lock, flags);
-	writeb(0x05, d->base + XR_CRA);	/* EC=1,TC=1: enable RX+TX */
-	d->port_active = true;
+	writeb(0x05, gd.base + c->cr);	/* EC=1,TC=1: enable RX+TX */
+	c->active = true;
 	spin_unlock_irqrestore(&port->lock, flags);
 
-	griffin_imr_update(d, XR_IMR_RXRDYA, 0);
+	griffin_imr_update(&gd, c->imr_rx, 0);
 	return 0;
 }
 
 static void griffin_uart_shutdown(struct uart_port *port)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
+	struct griffin_uart_chan *c = to_chan(port);
 	unsigned long flags;
 
-	griffin_imr_update(d, 0, XR_IMR_RXRDYA | XR_IMR_TXRDYA);
+	griffin_imr_update(&gd, 0, c->imr_rx | c->imr_tx);
 
 	spin_lock_irqsave(&port->lock, flags);
-	d->port_active = false;
-	writeb(0x0A, d->base + XR_CRA);	/* EC=2,TC=2: disable RX+TX */
+	c->active = false;
+	writeb(0x0A, gd.base + c->cr);	/* EC=2,TC=2: disable RX+TX */
 	spin_unlock_irqrestore(&port->lock, flags);
 }
 
@@ -474,16 +509,15 @@ static const struct uart_ops griffin_uart_ops = {
 
 static void griffin_console_putchar(struct uart_port *port, unsigned char ch)
 {
-	struct griffin_duart *d = container_of(port, struct griffin_duart, port);
-
-	while (!(readb(d->base + XR_SRA) & XR_SRA_TXRDY))
+	/* The console is strictly channel A. */
+	while (!(readb(gd.base + XR_SRA) & XR_SRA_TXRDY))
 		cpu_relax();
-	writeb(ch, d->base + XR_TBA);
+	writeb(ch, gd.base + XR_TBA);
 }
 
 static void griffin_console_write(struct console *co, const char *s, unsigned int count)
 {
-	uart_console_write(&gd.port, s, count, griffin_console_putchar);
+	uart_console_write(&gd.chan[0].port, s, count, griffin_console_putchar);
 }
 
 static int griffin_console_setup(struct console *co, char *options)
@@ -511,7 +545,7 @@ static struct uart_driver griffin_uart_driver = {
 	.dev_name	= "ttyS",
 	.major		= TTY_MAJOR,
 	.minor		= 64,
-	.nr		= 1,
+	.nr		= 2,	/* ttyS0 = channel A (console), ttyS1 = channel B */
 	.cons		= &griffin_console,
 };
 
@@ -519,11 +553,28 @@ static struct uart_driver griffin_uart_driver = {
  * platform_driver (late half): registers the tty port itself.
  * ------------------------------------------------------------------------ */
 
+/* One-time channel B hardware init.  Neither the ROM nor u-boot ever
+ * programs channel B (their serial code is A-only), so set up 115200 8N1
+ * here, mirroring u-boot's channel A recipe.  The BRG-extend bits are
+ * per-channel commands via CRB; ACR is shared with the timer and must not
+ * be touched.  RX/TX enable happens in startup() when the port opens. */
+static void griffin_uart_init_chan_b(struct griffin_duart *d)
+{
+	writeb(0x30, d->base + XR_CRB);	/* reset transmitter */
+	writeb(0x20, d->base + XR_CRB);	/* reset receiver */
+	writeb(0x10, d->base + XR_CRB);	/* reset MR pointer */
+	writeb(0x13, d->base + XR_MR1B);	/* MR1B: 8 bits, no parity */
+	writeb(0x07, d->base + XR_MR1B);	/* MR2B: 1 stop bit */
+	writeb(0x80, d->base + XR_CRB);	/* set RX BRG extend */
+	writeb(0xA0, d->base + XR_CRB);	/* set TX BRG extend */
+	writeb(0x88, d->base + XR_CSRB);	/* 115200 with extend */
+}
+
 static int griffin_uart_probe(struct platform_device *pdev)
 {
 	struct griffin_duart *d = &gd;
 	struct resource *res;
-	int ret;
+	int ret, i;
 
 	if (!d->base) {
 		dev_err(&pdev->dev, "early clockevent init did not run\n");
@@ -534,26 +585,49 @@ static int griffin_uart_probe(struct platform_device *pdev)
 	if (!res)
 		return -EINVAL;
 
-	d->port.membase = d->base;
-	d->port.mapbase = res->start;
-	d->port.iotype = UPIO_MEM;
-	d->port.irq = d->clkevt.irq;
-	d->port.uartclk = 115200 * 16;	/* informational only -- baud is fixed */
-	d->port.fifosize = 1;
-	d->port.ops = &griffin_uart_ops;
-	d->port.flags = UPF_BOOT_AUTOCONF;
-	d->port.line = 0;
-	d->port.type = PORT_GRIFFIN;
-	d->port.dev = &pdev->dev;
+	d->chan[0].sr = XR_SRA;
+	d->chan[0].cr = XR_CRA;
+	d->chan[0].rb = XR_RBA;
+	d->chan[0].tb = XR_TBA;
+	d->chan[0].imr_rx = XR_IMR_RXRDYA;
+	d->chan[0].imr_tx = XR_IMR_TXRDYA;
+
+	d->chan[1].sr = XR_SRB;
+	d->chan[1].cr = XR_CRB;
+	d->chan[1].rb = XR_RBB;
+	d->chan[1].tb = XR_TBB;
+	d->chan[1].imr_rx = XR_IMR_RXRDYB;
+	d->chan[1].imr_tx = XR_IMR_TXRDYB;
+
+	griffin_uart_init_chan_b(d);
 
 	ret = uart_register_driver(&griffin_uart_driver);
 	if (ret)
 		return ret;
 
-	ret = uart_add_one_port(&griffin_uart_driver, &d->port);
-	if (ret) {
-		uart_unregister_driver(&griffin_uart_driver);
-		return ret;
+	for (i = 0; i < 2; i++) {
+		struct uart_port *port = &d->chan[i].port;
+
+		port->membase = d->base;
+		port->mapbase = res->start;
+		port->iotype = UPIO_MEM;
+		port->irq = d->clkevt.irq;
+		port->uartclk = 115200 * 16;	/* informational only -- baud is fixed */
+		port->fifosize = 1;
+		port->ops = &griffin_uart_ops;
+		port->flags = UPF_BOOT_AUTOCONF;
+		port->line = i;
+		port->type = PORT_GRIFFIN;
+		port->dev = &pdev->dev;
+
+		ret = uart_add_one_port(&griffin_uart_driver, port);
+		if (ret) {
+			while (--i >= 0)
+				uart_remove_one_port(&griffin_uart_driver,
+						     &d->chan[i].port);
+			uart_unregister_driver(&griffin_uart_driver);
+			return ret;
+		}
 	}
 
 	platform_set_drvdata(pdev, d);
@@ -564,7 +638,8 @@ static void griffin_uart_remove(struct platform_device *pdev)
 {
 	struct griffin_duart *d = platform_get_drvdata(pdev);
 
-	uart_remove_one_port(&griffin_uart_driver, &d->port);
+	uart_remove_one_port(&griffin_uart_driver, &d->chan[1].port);
+	uart_remove_one_port(&griffin_uart_driver, &d->chan[0].port);
 	uart_unregister_driver(&griffin_uart_driver);
 }
 
